@@ -247,6 +247,41 @@ exports.listSocietyMaster = async (req, res, next) => {
   }
 };
 
+
+exports.listSocietyMaster_byID = async (req, res, next) => {
+  try {
+      const id = Number(req.params.id);
+    if (Number.isNaN(id)) {
+      throw new AppError('Invalid society id', 400, { isOperational: true });
+    }
+    const sql = 'SELECT id, society_name, society_code, status FROM apcms_society_master WHERE id = ? ORDER BY society_name ASC';
+
+    // 2. Execute the query
+    const [rows] = await pool.execute(sql, [id]);
+
+    // 3. Check if any records were found
+    if (rows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        data: [],
+        message: 'No society master records found.'
+      });
+    }
+
+    // 4. Send successful response
+    res.status(200).json({
+      success: true,
+      count: rows.length,
+      data: rows,
+      message: 'Successfully retrieved all society master records.'
+    });
+  } catch (error) {
+    // Pass any errors (like DB connection issues) to the global error handler
+    next(error);
+  }
+};
+
 exports.addMemberLoanDeposit = async (req, res, next) => {
   try {
     const body = req.body;

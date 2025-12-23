@@ -8,6 +8,7 @@ router.get('/get_item_master', ct_apcms.listAllItems);
 
 router.post('/add_society_master', ct_apcms.addSocietyMaster);
 router.get('/get_society_master', ct_apcms.listSocietyMaster);
+router.get('/get_society_master/:id', ct_apcms.listSocietyMaster_byID);
 
 router.post('/add_member_loan_deposit', ct_apcms.addMultipleMemberLoanDeposits);
 router.get('/get_member_loan_deposit/:type', ct_apcms.getMemberLoanDeposit);
