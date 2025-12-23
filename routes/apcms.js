@@ -9,16 +9,16 @@ router.get('/get_item_master', ct_apcms.listAllItems);
 router.post('/add_society_master', ct_apcms.addSocietyMaster);
 router.get('/get_society_master', ct_apcms.listSocietyMaster);
 
-router.post('/add_member_loan_deposit', ct_apcms.addMemberLoanDeposit);
+router.post('/add_member_loan_deposit', ct_apcms.addMultipleMemberLoanDeposits);
 router.get('/get_member_loan_deposit/:type', ct_apcms.getMemberLoanDeposit);
 
-router.post('/add_sales_purchase', ct_apcms.addSalesPurchase);
+router.post('/add_sales_purchase', ct_apcms.addMultipleSalesPurchases);
 router.get('/get_sales_purchase/:type', ct_apcms.getSalesPurchase);
 
-router.post('/add_marketing', ct_apcms.addMarketing);
+router.post('/add_marketing', ct_apcms.addMultipleMarketingRecords);
 router.get('/get_marketing', ct_apcms.getMarketing);
 
-router.post('/add_godown_util', ct_apcms.addGodownUtilization);
+router.post('/add_godown_util', ct_apcms.addMultipleGodownUtilizations);
 router.get('/get_godown_util', ct_apcms.getGodownUtilization);
 
 

@@ -337,7 +337,124 @@ exports.addMemberLoanDeposit = async (req, res, next) => {
   }
 };
 
-exports.getMemberLoanDeposit = async (req, res, next) => {
+exports.addMultipleMemberLoanDeposits = async (req, res, next) => {
+    try {
+        const records = req.body;
+
+        // 1. Validate that the input is an array
+        if (!Array.isArray(records)) {
+            throw new AppError('Payload must be an array of records.', 400);
+        }
+
+        const requiredFields = [
+            'society_id', 
+            'entry_date', 
+            'acc_type', 
+            'acc_sub_type', 
+            'item_id'
+        ];
+
+        const results = [];
+
+        // 2. Process each record in the array
+        for (const body of records) {
+            const rowResult = { 
+                identifier: body.entry_date,
+                action: 'error', 
+                message: 'Pending processing' 
+            };
+
+            try {
+                // A) Validate Mandatory Fields for this specific row
+                const missing = requireFields(body, requiredFields);
+                if (missing.length) {
+                    rowResult.message = `Missing fields: ${missing.join(', ')}`;
+                    results.push(rowResult);
+                    continue;
+                }
+
+                const {
+                    society_id, entry_date, acc_type, acc_sub_type, item_id,
+                    opening_amount = 0, payment_amount = 0, receipt_amount = 0, balance_amount = 0,
+                    p_opening_qty = 0, p_issued_qty = 0, p_received_qty = 0, p_balance_qty = 0
+                } = body;
+
+                // B) CHECK for existing record based on the 5-column unique combination
+                const checkSql = `
+                    SELECT id FROM apcms_member_loan_deposit 
+                    WHERE entry_date = ? AND society_id = ? AND acc_type = ? AND acc_sub_type = ? AND item_id = ?
+                `;
+                const [existing] = await pool.execute(checkSql, [entry_date, society_id, acc_type, acc_sub_type, item_id]);
+
+                let finalId;
+                let currentAction;
+
+                if (existing.length === 0) {
+                    // C) INSERT Logic
+                    currentAction = 'insert';
+                    const insertSql = `
+                        INSERT INTO apcms_member_loan_deposit (
+                            acc_type, acc_sub_type, item_id, society_id, entry_date,
+                            opening_amount, payment_amount, receipt_amount, balance_amount,
+                            p_opening_qty, p_issued_qty, p_received_qty, p_balance_qty
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `;
+                    const [insertResult] = await pool.execute(insertSql, [
+                        acc_type, acc_sub_type, item_id, society_id, entry_date,
+                        opening_amount, payment_amount, receipt_amount, balance_amount,
+                        p_opening_qty, p_issued_qty, p_received_qty, p_balance_qty
+                    ]);
+                    finalId = insertResult.insertId;
+                } else {
+                    // D) UPDATE Logic
+                    currentAction = 'update';
+                    finalId = existing[0].id;
+                    const updateSql = `
+                        UPDATE apcms_member_loan_deposit SET
+                            opening_amount = ?, payment_amount = ?, receipt_amount = ?, balance_amount = ?,
+                            p_opening_qty = ?, p_issued_qty = ?, p_received_qty = ?, p_balance_qty = ?
+                        WHERE id = ?
+                    `;
+                    await pool.execute(updateSql, [
+                        opening_amount, payment_amount, receipt_amount, balance_amount,
+                        p_opening_qty, p_issued_qty, p_received_qty, p_balance_qty,
+                        finalId
+                    ]);
+                }
+
+                rowResult.action = currentAction;
+                rowResult.id = finalId;
+                rowResult.message = `Successfully ${currentAction}ed.`;
+
+            } catch (rowError) {
+                rowResult.action = 'error';
+                rowResult.message = rowError.message;
+            }
+
+            results.push(rowResult);
+        }
+
+        // 3. Summarize outcomes
+        const summary = {
+            total: records.length,
+            inserted: results.filter(r => r.action === 'insert').length,
+            updated: results.filter(r => r.action === 'update').length,
+            failed: results.filter(r => r.action === 'error').length
+        };
+
+        // 4. Final Response
+        res.status(200).json({
+            success: summary.failed === 0,
+            summary,
+            results
+        });
+
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.oldgetMemberLoanDeposit = async (req, res, next) => {
   try {
     // 1. Get the type from the URL parameter (e.g., /api/ledger/LOAN)
     const { type } = req.params;
@@ -401,6 +518,102 @@ exports.getMemberLoanDeposit = async (req, res, next) => {
     next(error);
   }
 };
+
+exports.getMemberLoanDeposit = async (req, res, next) => {
+  try {
+    // 1. Get mandatory type from URL parameter
+    const { type } = req.params;
+    
+    // 2. Get optional date filters from query params
+    const { startdate, enddate } = req.query;
+
+    // 3. Validate type matches database ENUM
+    const allowedTypes = ['MEMBER', 'LOAN', 'DEPOSIT'];
+    const upperType = type.toUpperCase();
+    if (!allowedTypes.includes(upperType)) {
+      throw new AppError(
+        `Invalid type. Please use one of: ${allowedTypes.join(', ')}`,
+        400
+      );
+    }
+
+    // 4. Build dynamic WHERE clause and parameters
+    let whereConditions = ['l.acc_type = ?'];
+    let params = [upperType];
+
+    // 5. Add date filters if provided
+    if (startdate) {
+      whereConditions.push('l.entry_date >= ?');
+      params.push(startdate);
+    }
+    
+    if (enddate) {
+      whereConditions.push('l.entry_date <= ?');
+      params.push(enddate);
+    }
+
+    // 6. SQL Query with dynamic WHERE clause
+    const sql = `
+      SELECT
+        l.id,
+        l.society_id,
+        s.society_name,
+        l.entry_date,
+        l.acc_type,
+        l.acc_sub_type,
+        l.item_id,
+        i.item_name,
+        l.opening_amount,
+        l.payment_amount,
+        l.receipt_amount,
+        l.balance_amount,
+        l.p_opening_qty,
+        l.p_issued_qty,
+        l.p_received_qty,
+        l.p_balance_qty,
+        l.created_at
+      FROM apcms_member_loan_deposit l
+      LEFT JOIN apcms_society_master s ON l.society_id = s.id
+      LEFT JOIN apcms_item_master i ON l.item_id = i.id
+      WHERE ${whereConditions.join(' AND ')}
+      ORDER BY l.entry_date DESC
+    `;
+
+    const [rows] = await pool.execute(sql, params);
+
+    // 7. Handle empty results
+    if (rows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        data: [],
+        filters: {
+          type: upperType,
+          startdate: startdate || null,
+          enddate: enddate || null
+        },
+        message: `No records found for account type: ${upperType}${startdate || enddate ? ' with specified date range' : ''}`
+      });
+    }
+
+    // 8. Send Response
+    res.status(200).json({
+      success: true,
+      count: rows.length,
+      filters: {
+        type: upperType,
+        startdate: startdate || null,
+        enddate: enddate || null
+      },
+      data: rows
+    });
+
+  } catch (error) {
+    next(error);
+  }
+};
+
+
 
 exports.addSalesPurchase = async (req, res, next) => {
   try {
@@ -519,6 +732,129 @@ exports.addSalesPurchase = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+};
+
+exports.addMultipleSalesPurchases = async (req, res, next) => {
+    try {
+        const records = req.body;
+
+        // 1. Validate that the input is an array
+        if (!Array.isArray(records)) {
+            throw new AppError('Payload must be an array of records.', 400);
+        }
+
+        const requiredFields = [
+            'acc_type',
+            'acc_sub_type',
+            'item_id',
+            'society_id',
+            'entry_date'
+        ];
+
+        const results = [];
+
+        // 2. Process each record in the array
+        for (const body of records) {
+            const rowResult = { 
+                entry_date: body.entry_date,
+                item_id: body.item_id,
+                action: 'error', 
+                message: 'Pending processing' 
+            };
+
+            try {
+                // A) Per-Record Validation
+                const missing = requireFields(body, requiredFields);
+                if (missing.length) {
+                    rowResult.message = `Validation failed: Missing fields: ${missing.join(', ')}`;
+                    results.push(rowResult);
+                    continue; 
+                }
+
+                const {
+                    acc_type,
+                    acc_sub_type,
+                    item_id,
+                    society_id,
+                    entry_date,
+                    total_qty = 0,
+                    total_amount = 0
+                } = body;
+
+                // B) CHECK for existing record based on the 5-column unique combination
+                const checkSql = `
+                    SELECT id FROM apcms_sales_purchase 
+                    WHERE entry_date = ? AND society_id = ? AND acc_type = ? AND acc_sub_type = ? AND item_id = ?
+                `;
+                const [existing] = await pool.execute(checkSql, [
+                    entry_date, 
+                    society_id, 
+                    acc_type, 
+                    acc_sub_type, 
+                    item_id
+                ]);
+
+                let finalId;
+                let currentAction;
+
+                if (existing.length === 0) {
+                    // C) INSERT Logic
+                    currentAction = 'insert';
+                    const insertSql = `
+                        INSERT INTO apcms_sales_purchase (
+                            acc_type, acc_sub_type, item_id, society_id, entry_date, 
+                            total_qty, total_amount
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    `;
+                    const [insertResult] = await pool.execute(insertSql, [
+                        acc_type, acc_sub_type, item_id, society_id, entry_date, 
+                        total_qty, total_amount
+                    ]);
+                    finalId = insertResult.insertId;
+                } else {
+                    // D) UPDATE Logic
+                    currentAction = 'update';
+                    finalId = existing[0].id;
+                    const updateSql = `
+                        UPDATE apcms_sales_purchase SET
+                            total_qty = ?, 
+                            total_amount = ?
+                        WHERE id = ?
+                    `;
+                    await pool.execute(updateSql, [total_qty, total_amount, finalId]);
+                }
+
+                rowResult.action = currentAction;
+                rowResult.id = finalId;
+                rowResult.message = `Successfully ${currentAction}ed.`;
+
+            } catch (rowError) {
+                rowResult.action = 'error';
+                rowResult.message = `Database Error: ${rowError.message}`;
+            }
+
+            results.push(rowResult);
+        }
+
+        // 3. Summarize outcomes
+        const summary = {
+            total: records.length,
+            inserted: results.filter(r => r.action === 'insert').length,
+            updated: results.filter(r => r.action === 'update').length,
+            failed: results.filter(r => r.action === 'error').length
+        };
+
+        // 4. Final Response
+        res.status(200).json({
+            success: summary.failed === 0,
+            summary,
+            message: `Processed ${summary.total} records: ${summary.inserted} inserted, ${summary.updated} updated, ${summary.failed} failed.`,
+            results
+        });
+
+    } catch (error) {
+        next(error);
+    }
 };
 
 exports.getSalesPurchase = async (req, res, next) => {
@@ -715,6 +1051,154 @@ exports.addMarketing = async (req, res, next) => {
   }
 };
 
+exports.addMultipleMarketingRecords = async (req, res, next) => {
+    try {
+        const records = req.body;
+
+        // 1. Validate that the input is an array
+        if (!Array.isArray(records)) {
+            throw new AppError('Payload must be an array of records.', 400);
+        }
+
+        const requiredFields = [
+            'acc_type',
+            'acc_sub_type',
+            'item_id',
+            'society_id',
+            'entry_date'
+        ];
+
+        const results = [];
+
+        // 2. Process each record in the array
+        for (const body of records) {
+            const rowResult = { 
+                entry_date: body.entry_date,
+                item_id: body.item_id,
+                action: 'error', 
+                message: 'Pending processing' 
+            };
+
+            try {
+                // A) Validation for current record
+                const missing = requireFields(body, requiredFields);
+                if (missing.length) {
+                    rowResult.message = `Missing fields: ${missing.join(', ')}`;
+                    results.push(rowResult);
+                    continue; 
+                }
+
+                const {
+                    acc_type,
+                    acc_sub_type,
+                    item_id,
+                    society_id,
+                    entry_date,
+                    no_of_lots = 0,
+                    total_qty = 0,
+                    total_amount = 0,
+                    service_amount = 0
+                } = body;
+
+                // B) CHECK for existing record based on the 5-column unique combination
+                const checkSql = `
+                    SELECT id FROM apcms_marketing 
+                    WHERE entry_date = ? AND society_id = ? AND acc_type = ? AND acc_sub_type = ? AND item_id = ?
+                `;
+                const [existing] = await pool.execute(checkSql, [
+                    entry_date, 
+                    society_id, 
+                    acc_type, 
+                    acc_sub_type, 
+                    item_id
+                ]);
+
+                let finalId;
+                let currentAction;
+
+                if (existing.length === 0) {
+                    // C) INSERT Logic
+                    currentAction = 'insert';
+                    const insertSql = `
+                        INSERT INTO apcms_marketing (
+                            acc_type, 
+                            acc_sub_type, 
+                            item_id, 
+                            society_id, 
+                            entry_date, 
+                            no_of_lots,
+                            total_qty, 
+                            total_amount,
+                            service_amount
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `;
+                    const [insertResult] = await pool.execute(insertSql, [
+                        acc_type,
+                        acc_sub_type,
+                        item_id,
+                        society_id,
+                        entry_date,
+                        no_of_lots,
+                        total_qty,
+                        total_amount,
+                        service_amount
+                    ]);
+                    finalId = insertResult.insertId;
+                } else {
+                    // D) UPDATE Logic
+                    currentAction = 'update';
+                    finalId = existing[0].id;
+                    const updateSql = `
+                        UPDATE apcms_marketing SET
+                            no_of_lots = ?,
+                            total_qty = ?, 
+                            total_amount = ?,
+                            service_amount = ?
+                        WHERE id = ?
+                    `;
+                    await pool.execute(updateSql, [
+                        no_of_lots, 
+                        total_qty, 
+                        total_amount, 
+                        service_amount, 
+                        finalId
+                    ]);
+                }
+
+                rowResult.action = currentAction;
+                rowResult.id = finalId;
+                rowResult.message = `Successfully ${currentAction}ed.`;
+
+            } catch (rowError) {
+                rowResult.action = 'error';
+                rowResult.message = `Database Error: ${rowError.message}`;
+            }
+
+            results.push(rowResult);
+        }
+
+        // 3. Summarize results for the response
+        const summary = {
+            total: records.length,
+            inserted: results.filter(r => r.action === 'insert').length,
+            updated: results.filter(r => r.action === 'update').length,
+            failed: results.filter(r => r.action === 'error').length
+        };
+
+        // 4. Final Response
+        res.status(200).json({
+            success: summary.failed === 0,
+            summary,
+            message: `Batch complete: ${summary.inserted} inserted, ${summary.updated} updated, ${summary.failed} failed.`,
+            results
+        });
+
+    } catch (error) {
+        // Pass any system errors to the error handler
+        next(error);
+    }
+};
+
 exports.getMarketing = async (req, res, next) => {
   try {
     // 1. SQL Query with JOINs
@@ -890,6 +1374,148 @@ exports.addGodownUtilization = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+};
+
+exports.addMultipleGodownUtilizations = async (req, res, next) => {
+    try {
+        const records = req.body;
+
+        // 1. Validate that the input is an array
+        if (!Array.isArray(records)) {
+            throw new AppError('Payload must be an array of records.', 400);
+        }
+
+        const requiredFields = [
+            'acc_type',
+            'acc_sub_type',
+            'item_id',
+            'society_id',
+            'entry_date'
+        ];
+
+        const results = [];
+
+        // 2. Process each record in the array
+        for (const body of records) {
+            const rowResult = { 
+                entry_date: body.entry_date,
+                item_id: body.item_id,
+                action: 'error', 
+                message: 'Pending processing' 
+            };
+
+            try {
+                // A) Validation for individual record
+                const missing = requireFields(body, requiredFields);
+                if (missing.length) {
+                    rowResult.message = `Missing fields: ${missing.join(', ')}`;
+                    results.push(rowResult);
+                    continue; 
+                }
+
+                const {
+                    acc_type,
+                    acc_sub_type,
+                    item_id,
+                    society_id,
+                    entry_date,
+                    no_of_lots = 0,
+                    total_bag = 0,
+                    total_kgs = 0
+                } = body;
+
+                // B) CHECK for existing record based on the 5-column unique combination
+                const checkSql = `
+                    SELECT id FROM apcms_godown_utilization 
+                    WHERE entry_date = ? AND society_id = ? AND acc_type = ? AND acc_sub_type = ? AND item_id = ?
+                `;
+                const [existing] = await pool.execute(checkSql, [
+                    entry_date, 
+                    society_id, 
+                    acc_type, 
+                    acc_sub_type, 
+                    item_id
+                ]);
+
+                let finalId;
+                let currentAction;
+
+                if (existing.length === 0) {
+                    // C) INSERT Logic
+                    currentAction = 'insert';
+                    const insertSql = `
+                        INSERT INTO apcms_godown_utilization (
+                            acc_type, 
+                            acc_sub_type, 
+                            item_id, 
+                            society_id, 
+                            entry_date, 
+                            no_of_lots,
+                            total_bag, 
+                            total_kgs
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    `;
+                    const [insertResult] = await pool.execute(insertSql, [
+                        acc_type,
+                        acc_sub_type,
+                        item_id,
+                        society_id,
+                        entry_date,
+                        no_of_lots,
+                        total_bag,
+                        total_kgs
+                    ]);
+                    finalId = insertResult.insertId;
+                } else {
+                    // D) UPDATE Logic
+                    currentAction = 'update';
+                    finalId = existing[0].id;
+                    const updateSql = `
+                        UPDATE apcms_godown_utilization SET
+                            no_of_lots = ?,
+                            total_bag = ?, 
+                            total_kgs = ?
+                        WHERE id = ?
+                    `;
+                    await pool.execute(updateSql, [
+                        no_of_lots, 
+                        total_bag, 
+                        total_kgs, 
+                        finalId
+                    ]);
+                }
+
+                rowResult.action = currentAction;
+                rowResult.id = finalId;
+                rowResult.message = `Successfully ${currentAction}ed.`;
+
+            } catch (rowError) {
+                rowResult.action = 'error';
+                rowResult.message = `Database Error: ${rowError.message}`;
+            }
+
+            results.push(rowResult);
+        }
+
+        // 3. Summarize results
+        const summary = {
+            total: records.length,
+            inserted: results.filter(r => r.action === 'insert').length,
+            updated: results.filter(r => r.action === 'update').length,
+            failed: results.filter(r => r.action === 'error').length
+        };
+
+        // 4. Final Response
+        res.status(200).json({
+            success: summary.failed === 0,
+            summary,
+            message: `Processed ${summary.total} records: ${summary.inserted} inserted, ${summary.updated} updated, ${summary.failed} failed.`,
+            results
+        });
+
+    } catch (error) {
+        next(error);
+    }
 };
 
 exports.getGodownUtilization = async (req, res, next) => {
